@@ -1,0 +1,65 @@
+name: 'Executes a SSM document'
+description: 'Executes a System Manager document'
+inputs:
+  target-key:
+    description: 'The tags key to filter the target instances. Defaults to: Name'
+    default: "Name"
+    required: true
+  target-values:
+    description: 'The tags values to filter the target instances. Coma separated'
+    required: true
+  ssm-document-name:
+    description: 'Document name of the command:'
+    required: true
+  aws-account-id:
+    description: 'The AWS account id'
+    required: true
+  aws-region:
+    description: 'The AWS region'
+    required: true
+  sns-notification-arn:
+    description: 'The SNS ARN notification to send execution updates'
+    required: false
+    default: ""    
+runs:
+  using: "composite"
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-region: ${{ inputs.aws-region }}
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-id }}:role/${{ inputs.ssm-document-name }}
+        role-duration-seconds: 900 # the minimum
+        role-session-name: GithubExecuteSSMCommand@${{ github.actor }}
+        
+    - name: Execute command
+      shell: bash
+      id: execute
+      env:
+        COMMAND: ${{ inputs.ssm-document-name }}
+      run: |
+        if [ ! -z "${{ inputs.sns-notification-arn }}" ]
+        then
+          NOTIFICATION_PARAMS="--notification-config \"NotificationArn=${{ inputs.sns-notification-arn }},NotificationEvents=All,NotificationType=Command\""
+        else
+          NOTIFICATION_PARAMS=""
+        fi
+
+        COMMAND_ID=$(aws ssm send-command $NOTIFICATION_PARAMS \
+        --targets Key=tag:${{ inputs.target-key }},Values=${{ inputs.target-values }} \
+        --document-name "$COMMAND" \
+        --comment "Job run from Github by ${{ github.actor }}" \
+        --output text \
+        --query "Command.CommandId")
+
+        echo '::echo::on'
+        echo "::set-output name=COMMAND_ID::$COMMAND_ID"
+
+    - name: Show (temporary) results
+      shell: bash
+      run: |
+        echo "Warning: SSM send-command is async. This script will not wait until the command ends running. For async notifications use the sns-notification-arn parameter."
+        AWS_PAGER="" aws ssm list-command-invocations \
+        --command-id "${{ steps.execute.outputs.COMMAND_ID }}" \
+        --details \
+        --query "CommandInvocations[].CommandPlugins[].{Status:Status,Output:Output}"
